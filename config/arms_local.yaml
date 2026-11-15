@@ -1,0 +1,31 @@
+# Hardware config for the SO-101 leader/follower pair and the camera.
+# Every script in scripts/ reads this file. Relative paths are resolved from the repo root.
+
+follower:
+  # Stable name from udev/99-so101.rules. Use /dev/ttyACM? until the udev rule is installed.
+  port: /dev/ttyACM0
+  id: follower                      # calibration is saved as calib/motors/follower.json
+  calibration_dir: calib/motors
+  # Caps each goal to this many degrees from the follower's CURRENT position. null = no cap.
+  # Careful: the motors' force grows with (goal - current), so a small cap also caps the force.
+  # With 10 the arm lagged and couldn't lift a load. The cap also costs an extra read every loop.
+  max_relative_target: null
+  # Position-loop gains written to every follower motor on connect (lerobot defaults: P=16, I=0, D=32).
+  # Higher P = stiffer and faster tracking, but it can shake. The Feetech factory default is P=32.
+  p_coefficient: 16
+  d_coefficient: 32
+
+leader:
+  port: /dev/ttyACM1
+  id: leader                        # calibration is saved as calib/motors/leader.json
+  calibration_dir: calib/motors
+
+camera:
+  enabled: true
+  index_or_path: 0                  # find it with: uv run lerobot-find-cameras opencv
+  width: 640
+  height: 480
+  fps: 30
+
+teleop:
+  fps: 60                           # control loop rate

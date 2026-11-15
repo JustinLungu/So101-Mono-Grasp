@@ -1,0 +1,63 @@
+# Task 3: object detection -> grasp. Read by scripts/pick.py. Relative paths are resolved from the repo root.
+# ARM FRAME (used everywhere below and by pick.py): origin on the surface the arm stands on, directly
+# below the shoulder rotation axis (shoulder_pan). x forward, y left, z up. Meters / degrees.
+
+urdf: assets/so101/so101_new_calib.urdf
+
+# urdf_deg = motor_deg + offset. All 0 if the lerobot calibration lines up with the URDF.
+# Check with `python scripts/pick.py --where`: move the arm by hand and compare the printed tip
+# position with a tape measure. Fix one joint at a time if a pose is off.
+urdf_offset_deg:
+  shoulder_pan: 0.0
+  shoulder_lift: 0.0
+  elbow_flex: 0.0
+  wrist_flex: 0.0
+  wrist_roll: 0.0
+
+# --- Camera (Task 2 outputs) ---------------------------------------------------------------------
+intrinsics: calib/intrinsics.yaml     # fx, fy, cx, cy, dist at the camera resolution in arms.yaml
+ground: calib/ground.yaml             # h, tilt_deg, roll_deg
+# Where the floor point directly under the camera lens is, in the arm frame, and which way the camera
+# looks (yaw 0 = along the arm's +x). Written by scripts/calibrate_ground.py. z = floor height:
+#   arm standing on the same surface as the objects -> 0.0
+#   arm on the quadruped's back, 30 cm above the floor -> -0.30
+camera_ground_in_base: {x: 0.0, y: 0.0, z: 0.0, yaw_deg: 0.0}
+
+# --- Detection (HSV baseline) --------------------------------------------------------------------
+detection:
+  # OpenCV HSV: H 0-179, S 0-255, V 0-255. Default = red (wraps around H=0, so two ranges).
+  # Tune with: python scripts/pick.py --detect-only   (saves outputs/detection.jpg and outputs/mask.png)
+  hsv_ranges:
+    - {lower: [0, 120, 70], upper: [10, 255, 255]}
+    - {lower: [170, 120, 70], upper: [179, 255, 255]}
+  min_area_px: 300
+  # Half the object's height. The blob's centroid is the object's middle, so its ray is intersected
+  # with a plane this high above the floor (not with the floor itself, which would land too far away).
+  object_half_height_m: 0.015
+  # Only rotate the jaws for elongated objects; below this the object counts as round.
+  min_elongation_for_yaw: 1.3
+
+# --- Grasp ---------------------------------------------------------------------------------------
+grasp:
+  grasp_height_m: 0.015     # gripper tip height above the floor when the jaws close
+  approach_dist_m: 0.08     # pre-grasp: this far back along the approach direction
+  lift_height_m: 0.10
+  gripper_open: 60          # lerobot gripper units, 0-100
+  gripper_closed: 0         # the motor's torque limit stops it on the object
+  gripper_wait_s: 0.8
+  empty_grasp_margin: 3     # gripper within this of gripper_closed after closing = nothing grasped
+  speed_deg_s: 45           # joint speed for big moves
+  slow_speed_deg_s: 20      # descend / close
+
+workspace:                  # refuse targets outside this (horizontal distance from the shoulder axis)
+  min_radius_m: 0.16        # closer than this the elbow cannot fold enough for a top-down grasp
+  max_radius_m: 0.36        # top-down up to ~0.32, then the approach tilts (60 deg at 0.36, 40 at 0.40)
+  min_x_m: 0.05
+
+# --- Joint poses (motor degrees, as read by `pick.py --where`) ------------------------------------
+poses:
+  # Where the arm goes before looking for the object and at the end. For a wrist camera this must be
+  # the pose the ground calibration was done in. Default: the folded rest pose.
+  look: {shoulder_pan: 0.0, shoulder_lift: -65.0, elbow_flex: 80.0, wrist_flex: 72.0, wrist_roll: 0.0}
+  # Where to drop the object; null = keep holding it and go back to `look`.
+  place: null

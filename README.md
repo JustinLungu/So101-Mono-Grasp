@@ -13,8 +13,8 @@ This repo only holds the arm code. Robot drivers, motor calibration and kinemati
 | # | Task | Status |
 |---|------|--------|
 | 1 | Leader-follower teleoperation | ⏳ In progress |
-| 2 | Camera calibration (intrinsics + ground-plane extrinsics) | ⏳ Planned |
-| 3 | Object detection → grasp (pick and place) | ⏳ Planned |
+| 2 | Camera calibration (intrinsics + ground-plane extrinsics) | 🧪 Code written, tested on synthetic data, not yet on the real camera |
+| 3 | Object detection → grasp (pick and place) | 🧪 Code written, tested on synthetic data, not yet on the arm |
 
 ---
 
@@ -142,53 +142,70 @@ Most failures are hardware problems, not code. Check the red motor LEDs along th
 
 A single camera turns a pixel into a **direction** (a ray), not a distance. We get the distance by assuming the object is **on the floor** and working out where the ray hits the floor.
 
+Three scripts, all with a live window (tkinter: lerobot's OpenCV is headless, so `cv2.imshow` doesn't work):
+
+| Script | Writes | What you do |
+|---|---|---|
+| `scripts/calibrate_intrinsics.py` | `calib/intrinsics.yaml` | wave a printed checkerboard in front of the camera |
+| `scripts/calibrate_ground.py` | `calib/ground.yaml` + `camera_ground_in_base` in `config/grasp.yaml` | click 5–8 floor markers, type where they are |
+| `scripts/click_to_floor.py` | nothing | check: click the floor → arm-frame coordinates; `D` shows the detected object and whether it's in reach |
+
+The camera resolution is the one in `config/arms.yaml` (`camera:`). Calibrate at the resolution you pick at; if you change it, redo 2.1.
+
 ### 2.1 Intrinsics (once per camera and resolution)
 
-Print a checkerboard and measure the size of one square with a tape. Take about 15 photos of it from different angles and distances, then run `cv2.calibrateCamera`. This gives:
+Print a checkerboard (e.g. 10×7 squares = **9×6 inner corners**) and glue it on something flat. **Measure one square on the print** with a ruler, because printers rescale.
 
-- `fx, fy`: focal lengths in pixels
-- `cx, cy`: the image center (principal point)
-- distortion coefficients, used to undistort pixels before the ground-plane math
-
-Re-run this if you change the camera, its resolution or its focus.
-
-### 2.2 Ground-plane extrinsics (once per camera pose)
-
-Measure with the tape:
-
-- `h`: the camera's height above the floor
-
-Then click markers on the floor and measure each one:
-
-1. Put a marker on the floor and click it in the image (pixel `u, v`).
-2. Measure its **horizontal** distance `D` along the floor from the point directly under the camera. This is not the straight-line distance from the lens.
-3. Each marker gives one tilt estimate:
-
-   ```
-   angle_to_marker = atan(h / D)               # real angle below horizontal
-   angle_in_image  = atan((v − cy) / fy)       # angle relative to the optical axis
-   tilt            = angle_to_marker − angle_in_image
-   ```
-
-4. Use 3–5 markers at different distances and average the tilts, or fit them by least squares. Points spread across the image also let you solve for **roll**.
-
-### 2.3 Pixel → floor position
-
-For any new pixel `(u, v)`, after undistorting it:
-
-```
-α = tilt + atan((v − cy) / fy)     # angle below horizontal
-D = h / tan(α)                     # forward distance along the floor
-Y ≈ D · (u − cx) / fx              # sideways offset
+```bash
+python scripts/calibrate_intrinsics.py --cols 9 --rows 6 --square 0.025
 ```
 
-`(D, Y, 0)` is the point on the floor in the camera's ground frame. A fixed transform, measured with the tape, then puts it in the **arm base frame**.
+Move the board around: corners and edges of the image, near and far, tilted up to ~45° in every direction. Auto-capture takes a view whenever the board is steady somewhere new; the green dots show the coverage so far. After 15+ views press **C**: it calibrates, drops outlier views and saves. RMS < 0.5 px is good, and anything > 1 px means re-do it (bent board, blur, or a wrong `--square`). The frames are kept in `outputs/intrinsics_frames/` (re-run offline with `--images "outputs/intrinsics_frames/*.png"`).
+
+### 2.2 Camera pose relative to the arm and the floor (once per camera mount)
+
+No angle measuring: you click floor markers whose position you measured, and `cv2.solvePnP` finds the camera's height, tilt, roll **and** where it is relative to the arm.
+
+1. Camera in its picking position. **Camera on the arm: the arm must be in `poses.look`** (`--move-to-look` moves it there and holds it). Pick a `look` pose where the camera sees the floor in front of the arm: move the arm by hand with `pick.py --where` and copy the joint values into `config/grasp.yaml`.
+2. Put 5–8 markers (tape crosses, coins) on the floor, **spread out**: near/far and left/right, over the area you will pick from.
+3. Measure each one in the **arm frame**: origin = the point directly below the shoulder rotation axis, **x forward, y to the LEFT**, in cm.
+4. Run it, click each marker and type `x y` in cm:
+
+   ```bash
+   python scripts/calibrate_ground.py --move-to-look
+   ```
+
+   From the 4th marker on it fits on every click and draws the floor grid (5 cm squares, red = x axis, cyan = y axis, green = the arm's reach). The grid must lie on the real floor and the marker errors should be a few mm. One marker with a big error is probably mistyped: **U** removes the last one.
+5. **S** saves `calib/ground.yaml` (h, tilt, roll and the markers) and rewrites the `camera_ground_in_base` line in `config/grasp.yaml`.
+
+Arm on a different surface than the objects (quadruped)? Pass `--floor-z -0.30` (the floor is 30 cm below the arm frame origin).
+
+### 2.3 Check it
+
+```bash
+python scripts/click_to_floor.py --move-to-look
+```
+
+Click the floor anywhere and compare with a tape: it should be within ~1 cm in the picking area. **D** turns on the detection (green cross = in reach, red = out of reach, line = jaw direction) and **M** shows the color mask for tuning `detection.hsv_ranges`.
+
+### The math (`so101_mono_grasp/ground_plane.py`)
+
+A pixel gives a ray (`camera.py`: undistort, then `[(u−cx)/fx, (v−cy)/fy, 1]`). Rotate it with the tilt and roll into the ground frame G (origin on the floor under the lens, X forward, Z up). Then intersect it with the horizontal plane at height `z0`: the floor, or half the object's height for a blob centroid:
+
+```
+d = R_ground_cam(tilt, roll) · ray
+t = (h − z0) / (−d_z)            # needs d_z < 0: the ray goes down
+P_G = (0, 0, h) + t·d
+P_arm = Rz(yaw) · P_G + (x, y, z_floor)      # camera_ground_in_base
+```
+
+With `roll = 0` and the pixel on the image's center column this is the classic `D = h / tan(tilt + atan((v − cy)/fy))`.
 
 ### Assumptions and limitations
 
-- The object is **on the floor**. Height adds error, so aim for the object's bottom-center pixel, not its middle.
+- The object is **on the floor**. For an object of known height, intersect the ray of the blob's **centroid** with the plane at **half the object's height** (that's what `pick.py` does). Using the floor plane with the centroid lands too far away; using the bottom-center pixel lands on the near edge.
 - `h` and `tilt` only hold for the **pose the calibration was done in**:
-  - Camera on the wrist: always look from the same arm pose.
+  - Camera on the arm: always look from the same arm pose (`poses.look`). `pick.py` moves there before taking the picture.
   - Quadruped: pick only when standing still. Body pitch changes the tilt, so correct it with the IMU pitch (`tilt_effective = tilt + Δpitch`).
 - The error grows with distance because a small tilt error matters more at shallow angles. Calibrate with markers in the range where you will actually pick.
 
@@ -196,25 +213,50 @@ Y ≈ D · (u − cx) / fx              # sideways offset
 
 ## Task 3 — Object detection → grasp
 
-The pipeline:
-
 ```
 camera frame
-  → detect the object (bounding box / mask)
-  → grasp pixel (bottom-center of the box, or centroid of the mask)
-  → pixel → floor (x, y) in the camera ground frame       [Task 2]
-  → transform into the arm base frame                     [measured mount offset]
-  → IK (placo + SO-101 URDF) → pre-grasp above the object
-  → descend → close gripper → lift → place
+  → HSV color detection → blob centroid + long axis           so101_mono_grasp/detection.py
+  → centroid ray ∩ plane at the object's half height          so101_mono_grasp/ground_plane.py  [Task 2 calib]
+  → arm frame                                                 config/grasp.yaml: camera_ground_in_base
+  → IK (placo + SO-101 URDF): top-down, jaws across the long axis
+  → pre-grasp → descend → close → lift → (place) → home       so101_mono_grasp/grasp.py
 ```
 
-Plan for the detection step:
+| File | What it does |
+|---|---|
+| `config/grasp.yaml` | URDF, joint offsets, camera mount, HSV colors, grasp heights, gripper values, workspace, poses |
+| `scripts/pick.py` | the whole pipeline, plus debug modes (below) |
+| `so101_mono_grasp/kinematics.py` | FK and top-down grasp IK on placo; falls back to a tilted approach when vertical isn't reachable |
+| `so101_mono_grasp/camera.py` | intrinsics (`calib/intrinsics.yaml`), undistortion, pixel → ray |
+| `so101_mono_grasp/ground_plane.py` | `calib/ground.yaml` (h, tilt, roll), ray ∩ plane, ground → arm frame |
+| `so101_mono_grasp/detection.py` | HSV mask, largest blob, centroid, long axis, annotated debug image |
+| `so101_mono_grasp/grasp.py` | waypoint planning, joint-limit handling, smooth min-jerk moves on the follower |
+| `assets/so101/` | SO-101 URDF + meshes (from the `lerobot/robot-urdfs` HF bucket) |
 
-1. **Baseline:** color thresholding (HSV) on a brightly colored object. No training needed.
-2. **Then:** a pretrained detector (YOLO, or an open-vocabulary model such as OWL-ViT / Grounding DINO) to pick objects by name.
-3. **Orientation (optional):** angle of the mask's minimum-area rectangle → wrist roll.
+**Arm frame** (every coordinate in configs and scripts): origin on the surface the arm stands on, **directly below the shoulder rotation axis**; **x forward, y left, z up**, meters. (That is URDF `base_link` moved 3.9 cm forward. The `base_link` origin is under the back of the base, where you cannot measure from.)
 
-The IK uses `lerobot.model.kinematics.RobotKinematics` with the [SO-101 URDF](https://github.com/TheRobotStudio/SO-ARM100/blob/main/Simulation/SO101/so101_new_calib.urdf).
+### Bring-up, in this order
+
+```bash
+python scripts/pick.py --where                       # 1. torque OFF, move the arm by hand: is the printed tip xyz right?
+python scripts/pick.py --target 0.25 0.0 --dry-run   # 2. IK only, prints the waypoints
+python scripts/pick.py --target 0.25 0.0             # 3. real grasp at a tape-measured point, no camera
+python scripts/pick.py --detect-only                 # 4. camera + detection, writes outputs/detection.jpg and mask.png
+python scripts/pick.py --dry-run                     # 5. camera → floor point → IK, no motion
+python scripts/pick.py                               # 6. the full pick
+```
+
+Add `--config config/<your ports>.yaml` if the udev names aren't installed. Before moving, the plan is printed and you confirm with Enter (`--yes` skips that). Torque turns off at the end, the same as teleop.
+
+1. **FK check (`--where`).** This is the one that matters. LeRobot's 0° is the *middle of the range recorded during motor calibration*; the IK assumes that matches the URDF's 0°. Put the tip on a few measured points. If one joint is consistently off, set `urdf_offset_deg` for it.
+2. **Gripper values.** `gripper_open` / `gripper_closed` are lerobot's 0–100 units. Read the real values with `--where` while opening/closing by hand.
+3. **Detection colors.** Tune `detection.hsv_ranges` until `outputs/mask.png` is white only on the object.
+4. **Reach.** Straight-down grasps from 0.16 to about 0.32 m from the shoulder axis. Up to 0.36 m the gripper tilts (60°); closer than 0.16 m the elbow cannot fold enough. Arm base above the floor (quadruped): set `camera_ground_in_base.z` negative, and the reach on the floor shrinks.
+
+### Not done yet
+
+- Camera pose from the arm's FK at *any* pose (hand-eye calibration), so the arm doesn't have to go back to `look` every time.
+- A learned detector instead of HSV.
 
 ---
 
@@ -225,10 +267,13 @@ So101-Mono-Grasp/
 ├── README.md
 ├── pyproject.toml          # depends on ../lerobot (editable)
 ├── config/
-│   └── arms.yaml           # ports, IDs, camera, teleop settings
+│   ├── arms.yaml           # ports, IDs, camera, teleop settings
+│   └── grasp.yaml          # Task 3: camera mount, detection, grasp, poses
+├── assets/so101/           # SO-101 URDF + meshes (Task 3)
 ├── calib/
 │   ├── motors/             # follower.json, leader.json (Task 1)
-│   └── …                   # intrinsics.yaml, ground.yaml (Task 2, planned)
+│   ├── intrinsics.yaml     # Task 2.1 (calibrate_intrinsics.py)
+│   └── ground.yaml         # Task 2.2 (calibrate_ground.py)
 ├── udev/
 │   ├── 99-so101.rules      # stable /dev/so101_* names
 │   └── find_usb_serial.sh
@@ -236,14 +281,17 @@ So101-Mono-Grasp/
 │   ├── check_motors.py     # Task 1
 │   ├── calibrate_arms.py   # Task 1
 │   ├── teleop.py           # Task 1
-│   ├── calibrate_intrinsics.py   # Task 2 (planned): checkerboard → fx, fy, cx, cy, distortion
-│   ├── calibrate_ground.py       # Task 2 (planned): click markers + tape → tilt, roll, h
-│   ├── click_to_floor.py         # Task 2 (planned): click a pixel → floor (x, y)
-│   └── pick.py                   # Task 3 (planned): detect → localize → IK → grasp
+│   ├── calibrate_intrinsics.py   # Task 2: checkerboard → fx, fy, cx, cy, distortion
+│   ├── calibrate_ground.py       # Task 2: click measured floor markers → h, tilt, roll, camera mount
+│   ├── click_to_floor.py         # Task 2: click a pixel → floor (x, y); live detection check
+│   └── pick.py                   # Task 3: detect → localize → IK → grasp (+ --where, --target, --detect-only)
 └── so101_mono_grasp/
     ├── arms.py             # Task 1: follower/leader from config
-    ├── camera.py           # Task 2 (planned): pixel ↔ ray, undistortion
-    ├── ground_plane.py     # Task 2 (planned): ray ∩ floor, tilt/roll fitting
-    ├── detection.py        # Task 3 (planned): HSV baseline, then a learned detector
-    └── grasp.py            # Task 3 (planned): IK and gripper sequencing
+    ├── kinematics.py       # Task 3: FK + top-down grasp IK (placo)
+    ├── camera.py           # Task 2: Camera capture, intrinsics, pixel → ray, undistortion
+    ├── ground_plane.py     # Task 2: ray ∩ plane, ground → arm frame, camera pose fit (solvePnP)
+    ├── viewer.py           # Task 2: live tkinter window (keys, clicks)
+    ├── overlay.py          # Task 2: floor grid / reach / marker drawing
+    ├── detection.py        # Task 3: HSV baseline (learned detector: planned)
+    └── grasp.py            # Task 3: waypoint planning and execution
 ```
