@@ -41,23 +41,20 @@ The leader is almost always the 7.4 V type. Check the follower's motor stickers 
 
 ## Setup
 
-### 1. Install LeRobot
+This repo expects a LeRobot checkout **next to it** (`../lerobot`) and installs it as an editable dependency.
 
 ```bash
-git clone https://github.com/huggingface/lerobot.git
-cd lerobot
-uv sync --locked --extra core_scripts --extra feetech --extra kinematics
+git clone https://github.com/huggingface/lerobot.git ../lerobot   # if it isn't there yet
+uv sync                                                          # creates .venv with lerobot[feetech,kinematics]
 ```
 
-`feetech` is the motor bus driver. `kinematics` adds `placo`, which does the forward and inverse kinematics.
-
-### 2. Serial port permissions (Linux)
+Serial port permissions (Linux). Not needed once the udev rule from 1.2 is installed:
 
 ```bash
 sudo usermod -aG dialout $USER   # then log out and back in
 ```
 
-The one-off alternative: `sudo chmod 666 /dev/ttyACM*` after each time you plug the arms in.
+All the hardware settings (ports, arm IDs, camera, loop rate) are in [`config/arms.yaml`](config/arms.yaml). Every script reads that file.
 
 ---
 
@@ -65,52 +62,69 @@ The one-off alternative: `sudo chmod 666 /dev/ttyACM*` after each time you plug 
 
 Moving the leader arm by hand makes the follower copy its joint angles.
 
-Run every command from the `lerobot/` checkout and prefix it with `uv run`.
+| File | What it does |
+|---|---|
+| `config/arms.yaml` | ports, arm IDs, calibration folder, camera, safety cap |
+| `scripts/check_motors.py` | read-only check: does each motor 1–6 answer, plus its voltage and temperature |
+| `scripts/calibrate_arms.py` | motor calibration, saved to `calib/motors/<id>.json` (kept in the repo) |
+| `scripts/teleop.py` | leader → follower loop with an optional camera window |
+| `udev/` | stable port names `/dev/so101_follower` and `/dev/so101_leader` |
+| `so101_mono_grasp/arms.py` | builds lerobot's follower/leader from the config (reused by later tasks) |
 
 ### 1.1 Find the ports
 
-Plug in and power one arm at a time:
+Plug in and power **one arm at a time**:
 
 ```bash
-uv run lerobot-find-port
+./udev/find_usb_serial.sh
 ```
 
-Unplug the arm when it asks. The port that disappears belongs to that arm. On Linux it's usually `/dev/ttyACM0` / `/dev/ttyACM1`.
+Note which serial number belongs to which arm. Until the udev rule is installed, put the raw `/dev/ttyACM?` ports into `config/arms.yaml`.
 
-| Arm | Port |
-|---|---|
-| Follower | `/dev/ttyACM?` |
-| Leader | `/dev/ttyACM?` |
+### 1.2 Stable port names (udev)
 
-### 1.2 Set motor IDs (one time, skip if the arms came pre-configured)
+`ttyACM0` and `ttyACM1` can swap between reboots, and the leader would then be read with the follower's calibration. To prevent that, fill both serials into [`udev/99-so101.rules`](udev/99-so101.rules), then:
 
 ```bash
-uv run lerobot-setup-motors --robot.type=so101_follower --robot.port=<FOLLOWER_PORT>
-uv run lerobot-setup-motors --teleop.type=so101_leader  --teleop.port=<LEADER_PORT>
+sudo cp udev/99-so101.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+ls -l /dev/so101_*
 ```
 
-### 1.3 Calibrate the motors
-
-Move the arm to the middle of its range and press Enter. Then move **every** joint through its full range. The `id` is the name the calibration is saved under, so use the same one every time.
+### 1.3 Check the motors (read-only)
 
 ```bash
-uv run lerobot-calibrate --robot.type=so101_follower --robot.port=<FOLLOWER_PORT> --robot.id=follower
-uv run lerobot-calibrate --teleop.type=so101_leader  --teleop.port=<LEADER_PORT>  --teleop.id=leader
+uv run python scripts/check_motors.py
 ```
 
-Calibrations are saved to `~/.cache/huggingface/lerobot/calibration/`.
+Every motor should answer with a sensible voltage: about 5–8 V on the 7.4 V version, about 12 V on the 12 V version. If **no** motor answers on an arm, its motors probably still have the factory ID 1. Run motor setup once:
+
+```bash
+uv run lerobot-setup-motors --robot.type=so101_follower --robot.port=/dev/so101_follower
+uv run lerobot-setup-motors --teleop.type=so101_leader  --teleop.port=/dev/so101_leader
+```
+
+### 1.4 Calibrate the motors
+
+This is interactive. Put the arm in the middle of its range and press Enter. Then move **every** joint through its full range and press Enter again.
+
+```bash
+uv run python scripts/calibrate_arms.py                # both arms, follower first
+uv run python scripts/calibrate_arms.py --arm leader   # just one
+```
+
+The calibrations are saved to `calib/motors/follower.json` and `calib/motors/leader.json`. They're kept in the repo so the quadruped's computer uses the same ones.
 
 > This calibrates the **motors** so that the leader and follower agree on joint angles. Camera calibration is Task 2.
 
-### 1.4 Teleoperate
+### 1.5 Teleoperate
 
 ```bash
-uv run lerobot-teleoperate \
-  --robot.type=so101_follower --robot.port=<FOLLOWER_PORT> --robot.id=follower \
-  --teleop.type=so101_leader  --teleop.port=<LEADER_PORT>  --teleop.id=leader \
-  --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
-  --display_data=true
+uv run python scripts/teleop.py --no-camera   # arms only, do this first
+uv run python scripts/teleop.py               # with the camera window (q to quit)
 ```
+
+`follower.max_relative_target` in the config caps how far a joint can move in one step (10° by default). That avoids sudden jumps while the arm is new. Raise it or set it to `null` once teleop is smooth. Torque turns **off** when the script exits, so support the follower before stopping it.
 
 To find the camera index: `uv run lerobot-find-cameras opencv`.
 
@@ -204,20 +218,32 @@ The IK uses `lerobot.model.kinematics.RobotKinematics` with the [SO-101 URDF](ht
 
 ---
 
-## Repo layout (planned)
+## Repo layout
 
 ```
 So101-Mono-Grasp/
 ├── README.md
-├── calib/                  # saved calibration results (intrinsics.yaml, ground.yaml)
+├── pyproject.toml          # depends on ../lerobot (editable)
+├── config/
+│   └── arms.yaml           # ports, IDs, camera, teleop settings
+├── calib/
+│   ├── motors/             # follower.json, leader.json (Task 1)
+│   └── …                   # intrinsics.yaml, ground.yaml (Task 2, planned)
+├── udev/
+│   ├── 99-so101.rules      # stable /dev/so101_* names
+│   └── find_usb_serial.sh
 ├── scripts/
-│   ├── calibrate_intrinsics.py   # checkerboard → fx, fy, cx, cy, distortion
-│   ├── calibrate_ground.py       # click markers + tape distances → tilt, roll, h
-│   ├── click_to_floor.py         # live check: click a pixel → floor (x, y)
-│   └── pick.py                   # detect → localize → IK → grasp
+│   ├── check_motors.py     # Task 1
+│   ├── calibrate_arms.py   # Task 1
+│   ├── teleop.py           # Task 1
+│   ├── calibrate_intrinsics.py   # Task 2 (planned): checkerboard → fx, fy, cx, cy, distortion
+│   ├── calibrate_ground.py       # Task 2 (planned): click markers + tape → tilt, roll, h
+│   ├── click_to_floor.py         # Task 2 (planned): click a pixel → floor (x, y)
+│   └── pick.py                   # Task 3 (planned): detect → localize → IK → grasp
 └── so101_mono_grasp/
-    ├── camera.py           # pixel ↔ ray, undistortion
-    ├── ground_plane.py     # ray ∩ floor, tilt/roll fitting
-    ├── detection.py        # HSV baseline, then a learned detector
-    └── grasp.py            # IK and gripper sequencing
+    ├── arms.py             # Task 1: follower/leader from config
+    ├── camera.py           # Task 2 (planned): pixel ↔ ray, undistortion
+    ├── ground_plane.py     # Task 2 (planned): ray ∩ floor, tilt/roll fitting
+    ├── detection.py        # Task 3 (planned): HSV baseline, then a learned detector
+    └── grasp.py            # Task 3 (planned): IK and gripper sequencing
 ```

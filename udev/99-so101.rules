@@ -1,0 +1,15 @@
+# Stable device names for the two SO-101 arms, matched by each USB adapter's serial number.
+# ttyACM0/ttyACM1 can swap between reboots. These rules always give:
+#   /dev/so101_follower  and  /dev/so101_leader
+#
+# 1. Plug in the arms and run: ./udev/find_usb_serial.sh
+# 2. Replace the REPLACE_ME values below with the serials it prints.
+# 3. Install:
+#      sudo cp udev/99-so101.rules /etc/udev/rules.d/
+#      sudo udevadm control --reload-rules && sudo udevadm trigger
+# 4. Check: ls -l /dev/so101_*
+#
+# MODE="0666" also removes the need for the dialout group on these two ports.
+
+SUBSYSTEM=="tty", ATTRS{serial}=="5B14029771", SYMLINK+="so101_follower", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{serial}=="5B42134081", SYMLINK+="so101_leader",   MODE="0666"

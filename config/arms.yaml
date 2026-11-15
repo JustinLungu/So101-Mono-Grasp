@@ -1,0 +1,26 @@
+# Hardware config for the SO-101 leader/follower pair and the camera.
+# Every script in scripts/ reads this file. Relative paths are resolved from the repo root.
+
+follower:
+  # Stable name from udev/99-so101.rules. Use /dev/ttyACM? until the udev rule is installed.
+  port: /dev/so101_follower
+  id: follower                      # calibration is saved as calib/motors/follower.json
+  calibration_dir: calib/motors
+  # Safety cap: the most a joint may move in one step (degrees). null = no cap.
+  # Keep it on while bringing the arm up, then loosen it once teleop is smooth.
+  max_relative_target: 10.0
+
+leader:
+  port: /dev/so101_leader
+  id: leader                        # calibration is saved as calib/motors/leader.json
+  calibration_dir: calib/motors
+
+camera:
+  enabled: true
+  index_or_path: 0                  # find it with: uv run lerobot-find-cameras opencv
+  width: 640
+  height: 480
+  fps: 30
+
+teleop:
+  fps: 60                           # control loop rate

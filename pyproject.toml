@@ -1,0 +1,21 @@
+[project]
+name = "so101-mono-grasp"
+version = "0.1.0"
+description = "SO-101 arm: leader-follower teleop, single RGB camera calibration, ground-plane depth and pick-and-place."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "lerobot[feetech,kinematics]",
+    "pyyaml>=6",
+]
+
+[tool.uv.sources]
+# Local lerobot checkout next to this repo (../lerobot). Clone it to the same place on the robot.
+lerobot = { path = "../lerobot", editable = true }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["so101_mono_grasp"]
