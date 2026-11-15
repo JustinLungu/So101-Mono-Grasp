@@ -75,6 +75,8 @@ def make_follower(cfg: ArmsConfig, with_camera: bool = True) -> SO101Follower:
             id=f["id"],
             calibration_dir=_resolve(f.get("calibration_dir")),
             max_relative_target=f.get("max_relative_target"),
+            position_p_coefficient=int(f.get("p_coefficient", 16)),
+            position_d_coefficient=int(f.get("d_coefficient", 32)),
             cameras=cameras,
         )
     )

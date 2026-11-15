@@ -6,9 +6,14 @@ follower:
   port: /dev/so101_follower
   id: follower                      # calibration is saved as calib/motors/follower.json
   calibration_dir: calib/motors
-  # Safety cap: the most a joint may move in one step (degrees). null = no cap.
-  # Keep it on while bringing the arm up, then loosen it once teleop is smooth.
-  max_relative_target: 10.0
+  # Caps each goal to this many degrees from the follower's CURRENT position. null = no cap.
+  # Careful: the motors' force grows with (goal - current), so a small cap also caps the force.
+  # With 10 the arm lagged and couldn't lift a load. The cap also costs an extra read every loop.
+  max_relative_target: null
+  # Position-loop gains written to every follower motor on connect (lerobot defaults: P=16, I=0, D=32).
+  # Higher P = stiffer and faster tracking, but it can shake. The Feetech factory default is P=32.
+  p_coefficient: 16
+  d_coefficient: 32
 
 leader:
   port: /dev/so101_leader
